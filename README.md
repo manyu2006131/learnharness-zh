@@ -6,7 +6,7 @@
 >
 > **发布说明：** 此分支使用 GitHub Actions 重新构建 Windows 中文版并检查打包后的更新仓库。构建状态及下载以本仓库 Release 为准；未进行人工安装测试。含真实数据的上游测试目录未公开分发，见 [PUBLICATION-NOTES.md](PUBLICATION-NOTES.md)。
 >
-> **旧安装包提示：** 现有提供的 Windows 安装包是在此发布配置修正前构建，可能仍会从原版仓库检查更新；请在重新构建并验证中文版自动更新之前关闭应用的自动更新，避免被英文版覆盖。本仓库源码已将发布仓库指向 `manyu2006131/learnharness-zh`。
+> **已发布版本：** `v0.6.1-zh.1` 的 Windows 安装包已在 GitHub Actions 中重新构建，并核对包内更新地址为 `manyu2006131/learnharness-zh`。已通过构建、运行时冒烟检查和附件 SHA-256 校验；未进行人工安装或完整功能测试。
 
 ---
 
@@ -21,10 +21,10 @@
 <p align="center"><strong>An agent harness for learning.</strong></p>
 
 <p align="center">
-  <a href="https://learnharness.ai">Download</a> ·
+  <a href="https://github.com/manyu2006131/learnharness-zh/releases/download/v0.6.1-zh.1/LearnHarness-0.6.1-zh.1-x64-setup.exe">下载 Windows 简体中文版</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/README.md">Documentation</a> ·
-  <a href="https://github.com/amosblomqvist/learnharness/issues">Issues</a> ·
+  <a href="https://github.com/manyu2006131/learnharness-zh/issues">Issues</a> ·
   <a href="https://discord.gg/5tCHHQEB2e">Discord</a>
 </p>
 
@@ -55,19 +55,26 @@ Future teaching sessions can read the graph instead of starting from scratch. Pr
 
 ![LearnHarness knowledge graph](docs/assets/knowledge-graph.png)
 
-## Download and get started
+## 下载与安装
 
-**[Download from learnharness.ai](https://learnharness.ai)** · [GitHub Releases](https://github.com/amosblomqvist/learnharness/releases)
+本仓库当前提供 **Windows x64 非官方简体中文版 v0.6.1-zh.1**。
 
-- **macOS (Apple Silicon):** signed and notarized DMG. Drag the app to Applications.
-- **Windows (x64):** run the installer. It is currently unsigned; Windows may show an “unknown publisher” or SmartScreen warning.
-- **Linux (x64):** make the AppImage executable and open it, or install the Debian/Ubuntu `.deb`.
+1. [下载 Windows EXE 安装包](https://github.com/manyu2006131/learnharness-zh/releases/download/v0.6.1-zh.1/LearnHarness-0.6.1-zh.1-x64-setup.exe)。
+2. 运行安装包，按提示完成安装。
+3. 打开 LearnHarness，在设置中配置模型服务或兼容接口，再选择模型开始学习。使用第三方模型可能产生其服务商收取的费用。
+4. 可通过 [SHA256SUMS.txt](https://github.com/manyu2006131/learnharness-zh/releases/download/v0.6.1-zh.1/SHA256SUMS.txt) 核对下载文件完整性。
+
+[发布页面与更新说明](https://github.com/manyu2006131/learnharness-zh/releases/tag/v0.6.1-zh.1) · [对应源码 ZIP](https://github.com/manyu2006131/learnharness-zh/releases/download/v0.6.1-zh.1/LearnHarness-v0.6.1-zh.1-source.zip)
+
+安装包未签名，Windows 可能显示未知发布者或 SmartScreen 提示。当前发布已通过自动构建与运行时冒烟检查；尚未人工验证安装、完整界面操作或全部功能。
+
+本次没有发布 macOS 或 Linux 中文安装包；[原作者官网](https://learnharness.ai)及[上游 Releases](https://github.com/amosblomqvist/learnharness/releases)提供的是原版发行内容。
 
 Choose your models, then start a session with what you want to understand. You can use provider API keys, supported subscription connections in the desktop app, an installed [Claude Code CLI](docs/claude-code.md), or a [custom OpenAI-compatible endpoint](docs/custom-providers.md), including a local model server. Optional dictation and web search use separate service keys. Web research can use a Tavily, Brave, Exa, Firecrawl, or Ollama key in Settings → Providers → Search. Ollama search uses its hosted service, not a local model server.
 
 See [Getting started](docs/getting-started.md) for model setup, dictation, files, and notes imports, and [context, caching, and costs](docs/compaction-accounting.md) for advanced cache preferences.
 
-All three platforms support in-app updates.
+本次 Windows 中文安装包的内置更新目标已核对为本仓库；未进行端到端升级安装测试。
 
 ## Your keys, your data
 
@@ -82,14 +89,15 @@ All three platforms support in-app updates.
 npm ci
 npm run plugins:setup
 npm run dev        # http://localhost:3000
-npm test           # fixtures and fake providers
 ```
+
+本公开分发已排除上游测试目录，`npm test` 不能直接运行；原因及验证范围见 [PUBLICATION-NOTES.md](PUBLICATION-NOTES.md)。
 
 See the [documentation index](docs/README.md) for all guides, [development](docs/development.md) for setup and checks, [architecture](docs/architecture.md) for the runtime, [keyboard shortcuts](docs/keyboard.md), [themes](docs/themes.md) for the theme file format, and [desktop builds and releases](docs/desktop-release.md).
 
 For trusted local plugins, start with the [authoring guide and capability map](docs/plugin-authoring.md). It links the question, practice-problem, submission, view-context and UI contracts. Use [`examples/plugins/`](examples/plugins/) for small runnable templates, [`plugins/`](plugins/) for feature source projects, and the [host architecture](docs/plugin-architecture.md) for internals.
 
-Questions, bug reports, and feature requests: [GitHub Issues](https://github.com/amosblomqvist/learnharness/issues).
+Questions, bug reports, and feature requests: [GitHub Issues](https://github.com/manyu2006131/learnharness-zh/issues).
 
 Security vulnerabilities: report privately as described in [SECURITY.md](SECURITY.md), not in public issues.
 
