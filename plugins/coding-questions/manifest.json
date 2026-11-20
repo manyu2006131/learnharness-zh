@@ -1,0 +1,11 @@
+{
+	"apiVersion": 1,
+	"id": "coding-questions",
+	"name": "编程题",
+	"version": "0.1.0",
+	"minAppVersion": "0.4.1",
+	"description": "带语法高亮与自动测试的教学题和编程练习，使用你本机已安装的工具。以你的用户权限运行本地代码，无沙箱隔离。",
+	"main": "main.js",
+	"backend": "backend.cjs",
+	"styles": "styles.css"
+}

@@ -1,0 +1,490 @@
+/**
+ * Sub-agent job contracts — the async ack-and-steer protocol
+ *
+ * Part of the domain-split contracts (src/core/contracts/): each domain file
+ * is owned outright by its stream — cross-domain schema changes go through
+ * master. Pure types + protocol docs + tiny pure helpers; type-only imports
+ * of "ai" (safe everywhere: server, client, tests). See docs/archive/vision.md.
+ */
+import type { CallUsage } from "./chat.ts";
+import type { PluginBackgroundResult } from "../plugin-workers.ts";
+import type { LhMessage, LhMarkerMessage } from "../native-messages.ts";
+import { newHandoffMessage } from "../native-messages.ts";
+
+// ─── Async sub-agent jobs (docs/archive/vision.md §2.5; docs/archive/plan.md Wave 0 protocol) ────────────
+
+export type BuiltinJobKind = "research" | "demo" | "visual" | "pdf";
+export type JobKind = BuiltinJobKind | "plugin";
+export function isBuiltinJobKind(kind: JobKind): kind is BuiltinJobKind {
+	return kind !== "plugin";
+}
+/** Host-owned durable linkage. Never contains filesystem paths. */
+export interface PluginJobMetadata {
+	pluginId: string;
+	toolName: string;
+	workerId: string;
+	requestId: string;
+	taskId?: string;
+	input?: unknown;
+	label?: string;
+}
+export type JobResult = ResearchResult | DemoResult | VisualResult | PdfResult | PluginBackgroundResult;
+export type JobStatus = "running" | "done" | "error";
+
+export interface JobRecord {
+	id: string;
+	kind: JobKind;
+	chatId: string;
+	/** The tool part this job fulfills. */
+	toolCallId: string;
+	/** Dispatch-time arguments, saved before spawn. Older jobs resolve from history. */
+	input?: unknown;
+	/** Session-owned delivery, independent of the worker's terminal outcome.
+	 * A failure notice uses error text, never an invented result or learner abort.
+	 * Absent on legacy records: old terminal jobs must never be replayed. */
+	delivery?: { kind: "result" | "abort" | "failure"; status: "pending" | "delivered" };
+	/** Worker computation only; a pending delivery does not keep it running. */
+	status: JobStatus;
+	/** Latest human-readable activity line, e.g. `web_search: "sigma.js v3"`. */
+	activity: string;
+	createdAt: string;
+	updatedAt: string;
+	/** The sub-agent's result (steer-artifact payload). */
+	result?: unknown;
+	error?: string;
+	/** Money channel (observability, 2026-09): accumulated token usage of
+	 * the sub-agent's run, written by the runner as steps complete. Cost is
+	 * inferred at read time (core/prices.ts). Absent on pre-2026-09 jobs and
+	 * until the runner's capture lands — renderers show "—", never zero. */
+	usage?: JobUsage;
+	plugin?: PluginJobMetadata;
+}
+
+/** Accumulated model usage for one worker run: token totals plus a call
+ * count, with optional per-call accounting. As with CallUsage, a token field
+ * no call reported remains undefined; missing usage must not imply zero cost. */
+export interface JobUsage {
+	/** Provider-qualified model identity (provider:id) for catalog lookup. */
+	model: string;
+	/** Running totals summed over the run's model calls so far. */
+	inputTokens: number | undefined;
+	outputTokens: number | undefined;
+	cacheReadTokens: number | undefined;
+	cacheWriteTokens: number | undefined;
+	reasoningTokens: number | undefined;
+	cacheWrite1hTokens?: number;
+	/** Individual calls for current-catalog per-call tier pricing. Absent on
+	 * older jobs; never backfill them from cumulative totals. */
+	calls?: CallUsage[];
+	/** How many model calls the run has made (each bills separately). */
+	steps: number;
+	/** Most recent completed model call's accounting, used for current context
+	 * usage rather than cumulative totals. Absent until a call completes;
+	 * unreported provider fields remain undefined. */
+	lastStep?: CallUsage;
+}
+
+/** The per-model-call usage shape we fold into JobUsage — the SDK's
+ * LanguageModelUsage narrowed structurally (no runtime "ai" import: any
+ * object with these fields folds, including the real thing and test fakes). */
+export interface UsageStepLike {
+	inputTokens?: number | undefined;
+	inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number; cacheWrite1hTokens?: number } | undefined;
+	outputTokens?: number | undefined;
+	outputTokenDetails?: { reasoningTokens?: number } | undefined;
+}
+
+/** pi-ai's Usage shape (input/output/cacheRead/cacheWrite/reasoning?) →
+ * UsageStepLike. Structural — no pi import here; the engine band maps at
+ * its boundaries. */
+export function piUsageToStep(usage: {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cacheWrite1h?: number;
+	reasoning?: number;
+}): UsageStepLike {
+	return {
+		inputTokens: usage.input,
+		outputTokens: usage.output,
+		inputTokenDetails: { cacheReadTokens: usage.cacheRead, cacheWriteTokens: usage.cacheWrite, cacheWrite1hTokens: usage.cacheWrite1h ?? 0 },
+		outputTokenDetails: usage.reasoning !== undefined ? { reasoningTokens: usage.reasoning } : undefined,
+	};
+}
+
+/** Fold one model call's usage into the run's running total (pure). A
+ * field neither the total nor the step reported stays undefined; once
+ * reported, later unreported calls contribute 0. The `steps` counter is
+ * the billing count: one per model call, reported or not. */
+export function accumulateJobUsage(
+	total: JobUsage | undefined,
+	model: string,
+	step: UsageStepLike,
+): JobUsage {
+	const add = (a: number | undefined, b: number | undefined): number | undefined =>
+		a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+	const call: CallUsage = {
+		inputTokens: step.inputTokens,
+		outputTokens: step.outputTokens,
+		cacheReadTokens: step.inputTokenDetails?.cacheReadTokens,
+		cacheWriteTokens: step.inputTokenDetails?.cacheWriteTokens,
+		cacheWrite1hTokens: step.inputTokenDetails?.cacheWrite1hTokens,
+		reasoningTokens: step.outputTokenDetails?.reasoningTokens,
+	};
+	return {
+		model,
+		inputTokens: add(total?.inputTokens, step.inputTokens),
+		outputTokens: add(total?.outputTokens, step.outputTokens),
+		cacheReadTokens: add(total?.cacheReadTokens, step.inputTokenDetails?.cacheReadTokens),
+		cacheWriteTokens: add(total?.cacheWriteTokens, step.inputTokenDetails?.cacheWriteTokens),
+		reasoningTokens: add(total?.reasoningTokens, step.outputTokenDetails?.reasoningTokens),
+		cacheWrite1hTokens: ((total?.cacheWriteTokens ?? 0) > 0 && total?.cacheWrite1hTokens === undefined) ||
+			((call.cacheWriteTokens ?? 0) > 0 && call.cacheWrite1hTokens === undefined)
+			? undefined : add(total?.cacheWrite1hTokens, call.cacheWrite1hTokens),
+		steps: (total?.steps ?? 0) + 1,
+		...(!total || total.calls ? { calls: [...(total?.calls ?? []), call] } : {}),
+		lastStep: call,
+	};
+}
+
+/**
+ * THE ASYNC PROTOCOL — "ack now, steer later" (the pi sub-agents model,
+ * vision §2.5):
+ *
+ *  1. Job tools (research / demo / visual / pdf) are SERVER-EXECUTED. The model
+ *     calls one MID-TURN; execute creates the job record, fires the
+ *     background runner, and resolves IMMEDIATELY with an acknowledgement
+ *     ("dispatched — continue your turn"). The teacher's turn does NOT end
+ *     at the call: it keeps teaching, may dispatch other independent jobs
+ *     (full parallelism), and ends whenever it ends. The tool part's output
+ *     is the ack, forever.
+ *
+ *  2. The background runner (src/agent/subagents/runner.ts) runs the kind's
+ *     sub-agent loop — isolated context, modelFor(role), the
+ *     verify-never-one-shot doctrine (headless-tested demos, looked-at SVGs,
+ *     sourced briefs) — tracking a live activity line in the job record.
+ *     ONE central client poll of GET /api/jobs?chatId=… (in Chat) drives every
+ *     job surface: the transcript dispatch cards (live activity by
+ *     toolCallId, quiet one-liner after worker completion), the sub-agents sidebar
+ *     panel, and the single re-sync when a job settles.
+ *
+ *  3. Dispatch saves input on the job before spawn. On completion the
+ *     runner saves result + terminal worker status + pending delivery in
+ *     one job update, then queues buildSubagentSteer WITHOUT waiting for
+ *     delivery. The native custom marker's content is model-facing text;
+ *     details carry the full artifact payload for the UI. Worker resources
+ *     are released even if a question keeps the result pending indefinitely.
+ *     Only computing workers appear in Background agents or accept abort.
+ *
+ *  4. Session delivery owns one registry entry per deterministic steer ID,
+ *     including while a wake is in flight or a 409/403 returns its cargo.
+ *     A live agent takes it via pi steering; registration restores saved
+ *     pending jobs before the answer run's first poll. Otherwise the idle
+ *     wake uses the normal turn composition and respects pending questions,
+ *     dismissal, and background consent. A saved transcript marker completes
+ *     delivery; HTTP 200 or streamed visibility alone does not.
+ *
+ *     Failed starts remain quietly pending until a learner run or restart
+ *     recovery, without new timers, visible delivery errors, or worker-status
+ *     changes. Existing 409 backoff and consent deferral remain. Accepted
+ *     turns are never automatically replayed. Legacy running records with a
+ *     result become finished/pending; legacy terminal records with no
+ *     delivery metadata remain untouched. Session deletion discards pending
+ *     deliveries rather than treating them as running work.
+ *
+ *  5. No pending job parts ever exist, so the composer never gates on jobs
+ *     (the learner can interject mid-job; the steer queues behind their
+ *     turn) and job tool outputs never trigger the client-side
+ *     sendAutomatically continuation — that mechanism stays quiz/ask-only.
+ */
+
+export interface ResearchToolInput {
+	question: string;
+	/** What the teacher needs it for — focuses the research brief. */
+	context?: string;
+}
+
+export interface ResearchResult {
+	brief: string;
+	/** Rendered as links, so only http(s) URLs belong here (isWebSourceUrl).
+	 *  Records saved before that rule may still hold other schemes. */
+	sources: { title: string; url: string }[];
+}
+
+/** True for http(s) URLs: the only research sources that become links. */
+export function isWebSourceUrl(url: string): boolean {
+	try {
+		const { protocol } = new URL(url);
+		return protocol === "http:" || protocol === "https:";
+	} catch {
+		return false;
+	}
+}
+
+export interface DemoToolInput {
+	title: string;
+	/** Precise brief: concept, parameters/interactions, visual style. */
+	brief: string;
+}
+
+export interface DemoResult {
+	title: string;
+	/** Self-contained single-file HTML/JS document (sandboxed-iframe ready). */
+	html: string;
+	/** The builder sub-agent headlessly executed the demo before delivery. */
+	tested: true;
+	notes?: string;
+}
+
+export interface VisualToolInput {
+	/** Precise brief for ONE visual (what it must show, exactly). */
+	brief: string;
+	/** A learner image file to annotate (issue #363): the maker draws its
+	 *  marks on top of it instead of authoring a figure from scratch. */
+	image?: string;
+}
+
+export interface VisualResult {
+	/** Complete SVG markup (verified by the maker looking at the render).
+	 *  Annotation SVGs retain a learner-image placeholder; image identifies the session snapshot. */
+	svg: string;
+	notes?: string;
+	/** Present when the figure annotates a learner image: its absolute
+	 *  path. Photos never invert, so the card hides the switch. */
+	image?: { path: string; snapshotId: string };
+}
+
+/** The pdf-reader (sources v0, 2026-09): reads a learner-provided PDF on
+ *  the teacher's behalf — triage, targeted extraction, look-at-the-page
+ *  renders inside its own loop — and returns a text brief with page
+ *  citations (user-decided: rendered images never leave the sub-agent's
+ *  context; the teacher gets text). */
+export interface PdfToolInput {
+	/** Path to the learner's PDF (relative or absolute). */
+	path: string;
+	/** What the teacher needs from the document — focuses the brief. */
+	question: string;
+}
+
+export interface PdfResult {
+	path: string;
+	question: string;
+	/** The distilled brief. Page citations inside the text point at
+	 *  pagesConsulted. Failure shape: /^PDF failed:/i (mirrors research). */
+	brief: string;
+	/** Pages the reader actually READ — extract or render output entered the
+	 *  loop (the honest count for the UI badge; search-hit snippets don't
+	 *  count — sources v1 split, 2026-09-19, after the "78 pages consulted"
+	 *  overstatement on a long-book search-first read). */
+	pagesRead: number[];
+	/** Every page whose content entered the loop, search-hit context lines
+	 *  included — the full audit set (the brief's citations may point here). */
+	pagesConsulted: number[];
+}
+
+// ─── Sub-agent steer messages (THE ASYNC PROTOCOL §3–4) ─────────────────────
+//
+// Wave B (owner-approved 2026-09-26): steers are NATIVE record messages —
+// LhMarkerMessage customs (role "custom"), the custom-message taxonomy's
+// wake members. The model-facing text rides `content` (single-sourced
+// below); the UI payload (the artifact, the abort badge) rides `details`
+// and never reaches the model (toLlmMessages maps the marker to a user
+// message carrying `content` only). The deterministic id (`steer_<jobId>`)
+// IS the idempotency key — steerDelivered matches on it.
+
+/** Message metadata marking a sub-agent steer (contracts.ts §3). */
+export interface SubagentResultMeta {
+	jobId: string;
+	kind: JobKind;
+	toolCallId: string;
+	/** Present only on an abort steer (2026-09 abort semantics): the
+	 * learner aborted the job (it lands as error "已由学习者中止");
+	 * the teacher is told so its promise of a result doesn't hang
+	 * silently in the lesson. */
+	aborted?: true;
+	/** Delivery/recovery failure, not a learner abort or fabricated task outcome. */
+	failure?: string;
+}
+
+/** The data-subagent-artifact part payload: what the UI renders. */
+export interface SubagentArtifactData {
+	kind: JobKind;
+	result: JobResult;
+	/** The learner's pinned UI state (invert switch) riding the record. */
+	ui?: { inverted?: boolean };
+}
+
+/** A result steer's marker details: the UI's meta + artifact in one
+ *  payload (the projection splits it into metadata + data part). */
+export interface SteerDetails extends SubagentResultMeta {
+	result: JobResult;
+	/** LEARNER UI state pinned onto the artifact (owner, 2026-10-07): the
+	 *  invert switch's position, persisted so navigating away and back (or
+	 *  restarting) keeps it. A VIEW preference — never enters the teacher's
+	 *  context, never exports (the markdown engine reads `result` only). */
+	ui?: { inverted?: boolean };
+}
+
+/** Set a steer message's ui.inverted (pure): returns a NEW message array
+ *  with the target's details updated — no-op (same array) when the message
+ *  is missing or not an invertible artifact steer. The silent route's
+ *  whole body. */
+export function setSteerUiInverted(
+	messages: readonly LhMessage[],
+	messageId: string,
+	inverted: boolean,
+): LhMessage[] {
+	return messages.map((m) => {
+		if (m.id !== messageId) return m;
+		const d = (m as LhMarkerMessage).details as Partial<SteerDetails> | undefined;
+		if (!d || (d.kind !== "demo" && d.kind !== "visual")) return m;
+		return { ...m, details: { ...d, ui: { ...d.ui, inverted } } } as LhMessage;
+	});
+}
+
+/** Anything the wake pipeline may queue and deliver — a native marker. */
+export type SteerMessage = LhMarkerMessage;
+
+/** Whether a result is the failure shape (html/svg empty, failure brief). */
+export function isSubagentFailure(
+	kind: JobKind,
+	result: JobResult,
+): boolean {
+	if (kind === "plugin") return (result as PluginBackgroundResult).outcome.status !== "succeeded";
+	if (kind === "research") {
+		const r = result as ResearchResult;
+		return r.sources.length === 0 && /^(Research failed:|研究失败：)/.test(r.brief);
+	}
+	if (kind === "demo") {
+		const r = result as DemoResult;
+		return typeof r.html !== "string" || r.html.length === 0;
+	}
+	if (kind === "pdf") {
+		const r = result as PdfResult;
+		return /^(PDF failed:|PDF 失败：)/i.test(r.brief);
+	}
+	const r = result as VisualResult;
+	return typeof r.svg !== "string" || r.svg.length === 0;
+}
+
+/** The model-facing text of a steer: what the result IS, what to do with it. */
+function steerText(kind: JobKind, result: JobResult): string {
+	if (kind === "plugin") return (result as PluginBackgroundResult).text;
+	if (isSubagentFailure(kind, result)) {
+		if (kind === "research")
+			return `${(result as ResearchResult).brief}\n\n尽可能继续你能确认的内容，并向学习者标明不确定之处。`;
+		if (kind === "demo")
+			return `演示“${(result as DemoResult).title}”无法构建：${
+				(result as DemoResult).notes ?? "原因未知"
+			}。改用文字讲解；如果问题出在需求描述上，请用更紧凑的需求重新调用 demo。`;
+		if (kind === "pdf")
+			return `${(result as PdfResult).brief}\n\n继续利用本次会话中能确认的内容，并向学习者标明缺口。`;
+		return `插图无法生成：${(result as VisualResult).notes ?? "原因未知"}。改用文字或 mermaid，或用更紧凑的需求重新调用 visual。`;
+	}
+	if (kind === "research")
+		return `研究已完成——研究员的完整简报如下。请将其融入教学，并在使用其结论时引用来源：\n\n${(result as ResearchResult).brief}`;
+	if (kind === "pdf")
+		return `PDF 阅读已完成——“${(result as PdfResult).path}”的阅读简报如下，附页码引用。请将其融入教学，并在使用时引用页码：\n\n${(result as PdfResult).brief}`;
+	if (kind === "demo")
+		return `演示“${(result as DemoResult).title}”已构建、通过无头测试，并渲染在课程中。构建者备注：${sentence((result as DemoResult).notes)}\n请用它教学——按名称提及它的控件，并指引学习者尝试。`;
+	if ((result as VisualResult).image)
+		return `标注图已完成绘制、经检查验证，并渲染在课程中。制作者备注：${sentence((result as VisualResult).notes)}教学时引用其中的标注。`;
+	return `插图已完成绘制、经检查验证，并渲染在课程中。制作者备注：${sentence((result as VisualResult).notes)}教学时引用其中的元素。`;
+}
+
+const sentence = (text: string | undefined) => {
+	const body = text ?? "（无）";
+	return /[。！？.!?]$/.test(body) ? body : `${body}。`;
+};
+
+/**
+ * Build the steer message for a finished job (pure — shared by the runner,
+ * the wake pipeline, and tests). Deterministic id per job makes re-delivery
+ * idempotent.
+ */
+export function buildSubagentSteer(
+	job: Pick<JobRecord, "id" | "kind" | "toolCallId">,
+	result: JobResult,
+): SteerMessage {
+	return {
+		id: `steer_${job.id}`,
+		role: "custom",
+		customType: "subagent-steer",
+		content: steerText(job.kind, result),
+		display: true,
+		details: {
+			jobId: job.id,
+			kind: job.kind,
+			toolCallId: job.toolCallId,
+			result,
+		},
+		timestamp: Date.now(),
+	};
+}
+
+/** Build the abort steer for an aborted job (pure — shared by the
+ * abort path in src/server/jobs.ts and tests). Same id space as the result
+ * steer (same id space — exactly one delivers). */
+export function buildAbortSteer(
+	job: Pick<JobRecord, "id" | "kind" | "toolCallId">,
+): SteerMessage {
+	const meta = { jobId: job.id, kind: job.kind, toolCallId: job.toolCallId, aborted: true } as const;
+	return {
+		id: `steer_${job.id}`,
+		role: "custom",
+		customType: "subagent-abort",
+		content: abortText(job.kind),
+		display: true,
+		details: meta,
+		timestamp: Date.now(),
+	};
+}
+
+/** Honest pipeline failure: same deterministic marker id, no invented task result. */
+export function buildJobFailureSteer(
+	job: Pick<JobRecord, "id" | "kind" | "toolCallId">,
+	failure: string,
+): SteerMessage {
+	return {
+		id: `steer_${job.id}`, role: "custom", customType: "subagent-abort", display: true,
+		content: `后台任务恢复或投递失败：${failure}。无法确认任何工作结果。请说明该失败，并在不等待此结果的情况下继续。`,
+		details: { jobId: job.id, kind: job.kind, toolCallId: job.toolCallId, failure },
+		timestamp: Date.now(),
+	};
+}
+
+/** What the teacher reads: one line telling it the result is not coming,
+ * how to acknowledge, and that re-dispatching is allowed. */
+function abortText(kind: JobKind): string {
+	if (kind === "plugin") return "学习者在计算完成前中止了后台任务。简短说明后不必等待结果，继续教学。";
+	if (kind === "research")
+		return "研究已中止——学习者中止了研究任务，不会再有简报。用一句话说明后不带结果继续教学（或提议重新派发）。";
+	if (kind === "demo")
+		return "演示任务已被学习者中止——不会再有演示。用一句话说明，改用文字讲授该主题（学习者需要时可重新派发）。";
+	if (kind === "pdf")
+		return "PDF 阅读任务已被学习者中止——不会再有简报。用一句话说明后不带简报继续（学习者需要时可重新派发）。";
+	return "插图任务已被学习者中止——不会再有插图。用一句话说明后不带插图继续教学（学习者需要时可重新派发）。";
+}
+
+// ─── the probe handoff steer (the probe→teach split, docs/archive/probe-teach-split.md §2) ──
+//
+// probe_done's execute queues this through the same wake pipeline; the
+// pump fires it once the prober's turn ends (gates + grace). It carries no
+// artifact — the assessment it references is durable in the transcript as
+// the probe_done tool result. Deterministic id per chat: exactly one
+// handoff, idempotent re-delivery. The marker's content is HANDOFF_TEXT
+// (core/contracts/chat.ts — single source); the UI renders the quiet
+// system line off the customType. Nothing human-looking is persisted, ever.
+
+export function buildProbeHandoffSteer(chatId: string): SteerMessage {
+	return newHandoffMessage(chatId);
+}
+
+/** True when the transcript already carries this steer — idempotent
+ *  delivery for ANY steer kind: every steer id is deterministic per its
+ *  event (steer_<jobId> for jobs, steer_probe_<chatId> for the handoff). */
+export function steerDelivered(messages: LhMessage[], steerId: string): boolean {
+	return messages.some((m) => m.id === steerId);
+}
+

@@ -1,0 +1,10 @@
+{
+	"apiVersion": 1,
+	"id": "ui-showcase",
+	"name": "UI 展示",
+	"version": "0.1.0",
+	"minAppVersion": "0.4.1",
+	"description": "公共宿主 UI 控件、本地回调与原生会话表面的临时画廊。需要当前 feature/plugin-architecture 的 UI API。",
+	"main": "main.js",
+	"styles": "styles.css"
+}

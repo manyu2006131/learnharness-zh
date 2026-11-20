@@ -1,0 +1,171 @@
+name: Publish unofficial Chinese Windows release
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-zh.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-v0.6.1-zh.1
+  cancel-in-progress: false
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+  RELEASE_TAG: v0.6.1-zh.1
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Restore large upstream artwork with exact Git blob checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 https://raw.githubusercontent.com/amosblomqvist/learnharness/v0.6.1/build/icon.icns -o build/icon.icns
+          test "$(git hash-object build/icon.icns)" = acca254f30313d458292dded1daee7cbbcb8cff7
+          curl --fail --location --retry 3 https://raw.githubusercontent.com/amosblomqvist/learnharness/v0.6.1/docs/assets/knowledge-graph.png -o docs/assets/knowledge-graph.png
+          test "$(git hash-object docs/assets/knowledge-graph.png)" = 24711470e3a26bda77e38d8ea38c4e7f866ba436
+      - name: Set localized version without changing dependency resolutions
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          for (const name of ['package.json', 'package-lock.json']) {
+            const value = JSON.parse(fs.readFileSync(name, 'utf8'));
+            value.version = '0.6.1-zh.1';
+            if (value.packages?.['']) value.packages[''].version = '0.6.1-zh.1';
+            fs.writeFileSync(name, JSON.stringify(value, null, '\t') + '\n');
+          }
+          JS
+      - name: Commit release source
+        id: commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build/icon.icns docs/assets/knowledge-graph.png package.json package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Prepare v0.6.1-zh.1 source and restore upstream artwork"
+            git push origin HEAD:main
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: prepare
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - run: npm ci
+      - run: npm run plugins:setup
+      - run: npm run build
+      - run: node scripts/smoke-provider-runtime.mjs
+      - run: node scripts/build-server.mjs
+      - run: node scripts/smoke-server.mjs --electron
+      - name: Package Windows x64 with localized update destination
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Verify packaged update destination
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import yaml from 'js-yaml';
+          const feed = yaml.load(fs.readFileSync('dist/win-unpacked/resources/app-update.yml', 'utf8'));
+          if (feed.provider !== 'github' || feed.owner !== 'manyu2006131' || feed.repo !== 'learnharness-zh') throw new Error('Incorrect packaged update destination');
+          if (JSON.parse(fs.readFileSync('package.json', 'utf8')).version !== '0.6.1-zh.1') throw new Error('Incorrect localized version');
+          console.log('Packaged update destination: manyu2006131/learnharness-zh');
+          JS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-release-assets
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/*latest*.yml
+            dist/*zh*.yml
+
+  publish:
+    needs: [prepare, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-release-assets
+          path: release-assets
+      - name: Prepare corresponding source and SHA-256 checksums
+        run: |
+          set -euo pipefail
+          git archive --format=zip --prefix=LearnHarness-v0.6.1-zh.1/ HEAD > release-assets/LearnHarness-v0.6.1-zh.1-source.zip
+          test -s release-assets/LearnHarness-0.6.1-zh.1-x64-setup.exe
+          cd release-assets
+          sha256sum -- * > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Publish release with clear validation scope
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          ## LearnHarness v0.6.1-zh.1 非官方简体中文版
+          
+          基于 Amos Blomqvist 的 LearnHarness v0.6.1。原项目及本分支采用 AGPL-3.0-only，保留原作者署名与 LICENSE。
+          
+          - Windows x64 EXE 在 GitHub Actions 中从此标签对应源码重新构建；不是此前上传的旧安装包。
+          - 打包后检查 app-update.yml，确认更新仓库为 manyu2006131/learnharness-zh。
+          - 附件包括 Windows EXE、对应源码 ZIP、SHA256SUMS.txt 及可用的自动更新元数据。
+          - 已执行工作流中列出的构建和运行时冒烟检查。未进行人工安装、界面交互或完整功能测试；不声称安装包通过这些测试。
+          - 测试目录因包含真实学习记录、派生会话数据和测试私钥而从公开分发中排除，详情见 PUBLICATION-NOTES.md。其余应用源码与构建资源公开提供。
+          
+          下载后可用 SHA256SUMS.txt 检查文件完整性。
+          NOTES
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "$RELEASE_TAG 非官方简体中文版" --notes-file "$RUNNER_TEMP/release-notes.md" --draft
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md" --draft=false --latest
+      - name: Verify public release and download checksums
+        run: |
+          set -euo pipefail
+          test "$(gh repo view "$GITHUB_REPOSITORY" --json isPrivate --jq .isPrivate)" = false
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = false
+          mkdir "$RUNNER_TEMP/verify-release"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/verify-release"
+          (cd "$RUNNER_TEMP/verify-release" && sha256sum --check SHA256SUMS.txt)
+          curl --fail --location --head "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/LearnHarness-0.6.1-zh.1-x64-setup.exe"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"

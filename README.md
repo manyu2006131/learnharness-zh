@@ -4,7 +4,9 @@
 >
 > **中文版下载：** [本仓库 Releases](https://github.com/manyu2006131/learnharness-zh/releases)（下文保留的官网及上游下载链接指向英文原版）。
 >
-> **重要：** 现有提供的 Windows 安装包是在此发布配置修正前构建，可能仍会从原版仓库检查更新；请在重新构建并验证中文版自动更新之前关闭应用的自动更新，避免被英文版覆盖。本仓库源码已将发布仓库指向 `manyu2006131/learnharness-zh`。
+> **发布说明：** 此分支使用 GitHub Actions 重新构建 Windows 中文版并检查打包后的更新仓库。构建状态及下载以本仓库 Release 为准；未进行人工安装测试。含真实数据的上游测试目录未公开分发，见 [PUBLICATION-NOTES.md](PUBLICATION-NOTES.md)。
+>
+> **旧安装包提示：** 现有提供的 Windows 安装包是在此发布配置修正前构建，可能仍会从原版仓库检查更新；请在重新构建并验证中文版自动更新之前关闭应用的自动更新，避免被英文版覆盖。本仓库源码已将发布仓库指向 `manyu2006131/learnharness-zh`。
 
 ---
 
