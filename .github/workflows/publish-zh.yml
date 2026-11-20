@@ -46,8 +46,8 @@ jobs:
           import fs from 'node:fs';
           for (const name of ['package.json', 'package-lock.json']) {
             const value = JSON.parse(fs.readFileSync(name, 'utf8'));
-            value.version = '0.6.1-zh.1';
-            if (value.packages?.['']) value.packages[''].version = '0.6.1-zh.1';
+            value.version = '0.6.1';
+            if (value.packages?.['']) value.packages[''].version = '0.6.1';
             fs.writeFileSync(name, JSON.stringify(value, null, '\t') + '\n');
           }
           JS
@@ -86,7 +86,7 @@ jobs:
       - run: node scripts/build-server.mjs
       - run: node scripts/smoke-server.mjs --electron
       - name: Package Windows x64 with localized update destination
-        run: npx electron-builder --win --x64 --publish never
+        run: npx electron-builder --win --x64 --publish never -c.extraMetadata.version=0.6.1-zh.1
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
       - name: Verify packaged update destination
@@ -94,9 +94,11 @@ jobs:
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           import yaml from 'js-yaml';
+          import { extractFile } from '@electron/asar';
           const feed = yaml.load(fs.readFileSync('dist/win-unpacked/resources/app-update.yml', 'utf8'));
           if (feed.provider !== 'github' || feed.owner !== 'manyu2006131' || feed.repo !== 'learnharness-zh') throw new Error('Incorrect packaged update destination');
-          if (JSON.parse(fs.readFileSync('package.json', 'utf8')).version !== '0.6.1-zh.1') throw new Error('Incorrect localized version');
+          const packaged = JSON.parse(extractFile('dist/win-unpacked/resources/app.asar', 'package.json').toString('utf8'));
+          if (packaged.version !== '0.6.1-zh.1') throw new Error('Incorrect localized package version');
           console.log('Packaged update destination: manyu2006131/learnharness-zh');
           JS
       - uses: actions/upload-artifact@v7
